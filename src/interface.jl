@@ -7,6 +7,41 @@ function setup_server(env = dirname(SymbolServer.Pkg.Types.Context().env.project
     server
 end
 
+function indexlines(io::IO)
+    lines = readlines(io, keep = true)
+    indices = cumsum(length(line) for line in lines)
+    indices, lines
+end
+indexlines(text::AbstractString) = indexlines(IOBuffer(text))
+
+const noqa = r"# noqa\(([^)]+)\)"
+
+function format_hint(indices, lines, prefix, offset, x)
+    if haserror(x)
+        message = LintCodeDescriptions[x.meta.error]
+        code = String(Symbol(x.meta.error))
+    else
+        message = "Missing reference"
+        code = "MissingRef"
+    end
+
+    row = searchsortedfirst(indices, offset)
+    m = match(noqa, lines[row])
+    if m !== nothing
+        (codes,) = m
+        code in eachsplit(codes, ',') && return ""
+    end
+
+    col = offset - get(indices, row - 1, 0)
+    "$(prefix)$(row):$(col): $(message)"
+end
+
+function format_hints(source, prefix, hints)
+    indices, lines = indexlines(source)
+    result = [(x, format_hint(indices, lines, prefix, offset + 1, x)) for (offset, x) in hints]
+    filter!(((_, hint),) -> !isempty(hint), result)
+end
+
 """
     lint_string(s, server; gethints = false)
 
@@ -23,7 +58,7 @@ function lint_string(s::String, server = setup_server(); gethints = false)
     semantic_pass(f)
     check_all(f.cst, LintOptions(), env)
     if gethints
-        return f.cst, [(x, string(haserror(x) ? LintCodeDescriptions[x.meta.error] : "Missing reference", " at offset ", offset)) for (offset, x) in collect_hints(f.cst, env)]
+        return f.cst, format_hints(f.source, "", collect_hints(f.cst, env))
     else
         return f.cst
     end
@@ -47,8 +82,10 @@ function lint_file(rootpath, server = setup_server(); gethints = false)
     end
     if gethints
         hints = []
+        rootdir = dirname(rootpath)
         for (p,f) in server.files
-            append!(hints, [(x, string(haserror(x) ? LintCodeDescriptions[x.meta.error] : "Missing reference", " at offset ", offset, " of ", p)) for (offset, x) in collect_hints(f.cst, getenv(f, server))])
+            prefix = "$(relpath(p, rootdir)):"
+            append!(hints, format_hints(f.source, prefix, collect_hints(f.cst, getenv(f, server))))
         end
         return root, hints
     else
